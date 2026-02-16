@@ -10,47 +10,58 @@ from selector import select_random_card, select_weighted_card
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
-PROGRESS_PATH = DATA_DIR / "progress.csv"
 
 
 def load_cards() -> pd.DataFrame:
-    csv_paths = sorted(DATA_DIR.glob("flashcards_*.csv"))
-    if not csv_paths:
-        return pd.DataFrame(columns=["id", "question", "answer"])
-
     frames = []
-    for path in csv_paths:
-        frame = pd.read_csv(path, header=None, names=["question", "answer"])
-        frame = frame.reset_index().rename(columns={"index": "source_row"})
-        frame["source_path"] = str(path)
-        frames.append(frame)
+    category_dirs = [path for path in DATA_DIR.iterdir() if path.is_dir()]
+    for category_dir in sorted(category_dirs):
+        csv_paths = sorted(category_dir.glob("flashcards_*.csv"))
+        for path in csv_paths:
+            frame = pd.read_csv(path, header=None, names=["question", "answer"])
+            frame = frame.reset_index().rename(columns={"index": "source_row"})
+            frame["source_path"] = str(path)
+            frame["category"] = category_dir.name
+            frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(
+            columns=["id", "question", "answer", "source_row", "source_path", "category"]
+        )
+
     cards = pd.concat(frames, ignore_index=True)
     cards.index.name = "id"
     cards = cards.reset_index()
     return cards
 
 
-def load_progress(card_count: int) -> pd.DataFrame:
-    if PROGRESS_PATH.exists():
-        progress = pd.read_csv(PROGRESS_PATH)
+def load_progress(card_ids: list[int], category_dir: Path) -> pd.DataFrame:
+    progress_path = category_dir / "progress.csv"
+    category_dir.mkdir(parents=True, exist_ok=True)
+
+    if progress_path.exists():
+        progress = pd.read_csv(progress_path)
         progress = progress[["id", "score_class"]]
     else:
         progress = pd.DataFrame(columns=["id", "score_class"])
 
     existing_ids = set(progress["id"].tolist()) if not progress.empty else set()
-    missing_ids = [card_id for card_id in range(card_count) if card_id not in existing_ids]
+    missing_ids = [card_id for card_id in card_ids if card_id not in existing_ids]
     if missing_ids:
         additions = pd.DataFrame({"id": missing_ids, "score_class": [0] * len(missing_ids)})
         progress = pd.concat([progress, additions], ignore_index=True)
 
+    progress = progress[progress["id"].isin(card_ids)]
     progress["score_class"] = progress["score_class"].fillna(0).astype(int)
     progress = progress.sort_values("id").reset_index(drop=True)
-    progress.to_csv(PROGRESS_PATH, index=False)
+    progress.to_csv(progress_path, index=False)
     return progress
 
 
-def save_progress(progress: pd.DataFrame) -> None:
-    progress.to_csv(PROGRESS_PATH, index=False)
+def save_progress(progress: pd.DataFrame, category_dir: Path) -> None:
+    progress_path = category_dir / "progress.csv"
+    category_dir.mkdir(parents=True, exist_ok=True)
+    progress.to_csv(progress_path, index=False)
 
 
 def update_model_answer(cards: pd.DataFrame, card_id: int, new_answer: str) -> bool:
@@ -88,18 +99,63 @@ def ensure_current_question(
     return select_random_card(cards)
 
 
+def category_sort_key(name: str) -> tuple[int, int | str]:
+    if name == "all":
+        return (0, 0)
+    if name.isdigit():
+        return (1, int(name))
+    if name.isalpha():
+        return (2, name)
+    return (3, name)
+
+
+def format_category_label(name: str) -> str:
+    if name == "all":
+        return "全体"
+    if name.isdigit():
+        return f"第{name}章"
+    return name
+
+
 st.set_page_config(page_title="損保2次試験用フラッシュカード")
 
 st.title("損保2次試験 フラッシュカード")
 
 cards = load_cards()
 if cards.empty:
-    st.warning("問題データが見つかりません。data/flashcards_*.csv を確認してください。")
+    st.warning("問題データが見つかりません。data/*/flashcards_*.csv を確認してください。")
     st.stop()
 
-progress = load_progress(len(cards))
+st.subheader("出題範囲")
+categories = sorted(cards["category"].dropna().unique().tolist(), key=category_sort_key)
+if not categories:
+    st.warning("出題フォルダが見つかりません。data配下のフォルダ構成を確認してください。")
+    st.stop()
 
-status = cards.merge(progress, on="id", how="left")
+selected_category = st.selectbox(
+    "フォルダ",
+    categories,
+    index=0,
+    format_func=format_category_label,
+    key="selected_category",
+)
+
+selected_category_dir = DATA_DIR / selected_category
+
+if st.session_state.get("last_category") != selected_category:
+    st.session_state["current_id"] = None
+    st.session_state["reset_answer"] = True
+    st.session_state["scored"] = False
+    st.session_state["last_category"] = selected_category
+
+filtered_cards = cards[cards["category"] == selected_category]
+if filtered_cards.empty:
+    st.warning("選択したフォルダに問題がありません。")
+    st.stop()
+
+progress = load_progress(filtered_cards["id"].tolist(), selected_category_dir)
+
+status = filtered_cards.merge(progress, on="id", how="left")
 status["score_class"] = status["score_class"].fillna(0).astype(int)
 total_cards = len(status)
 count0 = int((status["score_class"] == 0).sum())
@@ -162,7 +218,7 @@ if not weights_valid:
 
 weights = {0: weight0, 1: weight1, 2: weight2}
 
-current = ensure_current_question(cards, progress, weights, weights_valid)
+current = ensure_current_question(filtered_cards, progress, weights, weights_valid)
 if current is None:
     st.warning("問題を選択できませんでした。")
     st.stop()
@@ -189,14 +245,14 @@ with col_score:
         st.session_state["scored"] = True
 
         progress.loc[progress["id"] == int(current["id"]), "score_class"] = score_class
-        save_progress(progress)
+        save_progress(progress, selected_category_dir)
 
 with col_next:
     if st.button("次の問題"):
         if not weights_valid:
             st.warning("出題割合の合計が100%になるよう設定してください。")
         else:
-            next_card = select_weighted_card(cards, progress, weights)
+            next_card = select_weighted_card(filtered_cards, progress, weights)
             if next_card is None:
                 st.warning("選択した出題割合で問題を選べませんでした。")
             else:
@@ -226,6 +282,6 @@ if st.session_state.get("scored"):
     with col_mark:
         if st.button("正答として登録(100%)"):
             progress.loc[progress["id"] == int(current["id"]), "score_class"] = 2
-            save_progress(progress)
+            save_progress(progress, selected_category_dir)
             st.session_state["last_similarity"] = 100
             st.success("100%正解として記録しました。")

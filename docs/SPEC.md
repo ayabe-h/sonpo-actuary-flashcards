@@ -19,8 +19,13 @@ Target platform: Android (via mobile browser / PWA-style usage).
 
 ## 3. Data Specification
 
-### 3.1 cards.csv (input)
-Located at: data/cards.csv
+### 3.1 flashcards_*.csv (input)
+Located at: data/<folder>/flashcards_*.csv
+
+Folders:
+- all (全体)
+- 1〜11 (各章)
+- A, B
 
 Required columns:
 
@@ -37,11 +42,11 @@ question,answer
 ---
 
 ### 3.2 progress.csv (auto-generated)
-Located at: data/progress.csv
+Located at: data/<folder>/progress.csv
 
 | column        | type | description |
 |--------------|------|-------------|
-| id           | int  | card id |
+| id           | int  | card id (global id from merged cards) |
 | score_class  | int  | 0, 1, or 2 |
 
 Score class definition:
@@ -52,7 +57,8 @@ Score class definition:
 Initial state:
 - All cards start as score_class = 0
 
-If progress.csv does not exist, generate it automatically.
+If progress.csv does not exist in the selected folder, generate it automatically.
+Only card ids that exist in the selected folder are stored.
 
 ---
 
@@ -93,7 +99,7 @@ After scoring:
 
 ## 6. Question Selection Logic
 
-User can select question pool:
+User can select question pool within the selected folder:
 - Only score_class = 0
 - Only score_class = 1
 - Only score_class = 2
